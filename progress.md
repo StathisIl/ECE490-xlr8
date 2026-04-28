@@ -13,6 +13,7 @@ Update this file every week.
 
 ### Problems / Risks
 - Example: hardware delay
+- We need to create a voltage divider with two resistors 1kOhm and 2.2kOhm
 
 ### Next Steps
 - Finalize architecture
