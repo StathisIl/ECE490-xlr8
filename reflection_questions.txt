@@ -1,0 +1,15 @@
+1.
+Git is a Distributed Version Control System that allows developers to track changes in their code over time.
+Instead of saving different versions of a file as final_v1.py, final_v2.py etc, Git takes snapshots of your entire project, allowing you to jump back to any point in its history.
+
+2.
+Git add is used to "prepare" a specific change, while git commit takes everything from or current local directory and wraps it into a permanent snapshot in our git directory.
+
+3.
+Because they allow us to branch off from the main line of development to work on something specific without making a mess of the stable code everyone else is using.
+
+4.
+A pull request is the bridge between a completed task on a branch and the main project. 
+
+5. 
+Issues act as the project's "To-Do" list,bug tracker and suggestion box all in one.
