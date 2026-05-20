@@ -35,7 +35,7 @@ Update this file every week.
 
 ### In Progress
 - Add a Zero Trust Network Access(using Twingate) to PI for remote access.
-- Sensor Calibration: i) Humidity Sensor: DRY_VALUE = 25350, WEB_VALUE = 8000 those values are approximate averages after some tests
+- Sensor Calibration: i) Humidity Sensor: DRY_VALUE = 25350, WET_VALUE = 8000 those values are approximate averages after some tests
 
 
 ### Problems / Risks
