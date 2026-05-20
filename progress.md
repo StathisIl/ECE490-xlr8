@@ -29,12 +29,17 @@ Update this file every week.
 
 ## Week 2
 ### Completed
+- Completed the setup and connected hose to flow sensor and humidity sensor on a pot 
+- Tested the sensors using test_sensor.py
+- Completed Lab5 and tried grafana and influxDB
 
 ### In Progress
+- Add a Zero Trust Network Access(using Twingate) to PI for remote access.
 
 ### Problems / Risks
+- The flow sensor leaks when water comes through.
 
-### Next Steps
+- Write a python script to connect the pi with influx db and sends data from sensors (percentage for the humidity sensor and litters for the flow sensor)
 
 ### Team Contribution
 - Student 1:
