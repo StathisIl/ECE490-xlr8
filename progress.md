@@ -35,11 +35,13 @@ Update this file every week.
 
 ### In Progress
 - Add a Zero Trust Network Access(using Twingate) to PI for remote access.
+- Sensor Calibration: i) Humidity Sensor: DRY_VALUE = 25350, WEB_VALUE = 8000 those values are approximate averages after some tests
+
 
 ### Problems / Risks
 - The flow sensor leaks when water comes through.
 
-- Write a python script to connect the pi with influx db and sends data from sensors (percentage for the humidity sensor and litters for the flow sensor)
+- Write a python script to connect the pi with influx db and send data from sensors (percentage for the humidity sensor and litters for the flow sensor)
 
 ### Team Contribution
 - Student 1:
