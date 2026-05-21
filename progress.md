@@ -32,9 +32,9 @@ Update this file every week.
 - Completed the setup and connected hose to flow sensor and humidity sensor on a pot 
 - Tested the sensors using test_sensor.py
 - Completed Lab5 and tried grafana and influxDB
+- Added Twingate to access pi remotely
 
 ### In Progress
-- Add a Zero Trust Network Access(using Twingate) to PI for remote access.
 - Sensor Calibration: i) Humidity Sensor: DRY_VALUE = 25350, WEB_VALUE = 8000 those values are approximate averages after some tests
 
 
@@ -44,5 +44,5 @@ Update this file every week.
 - Write a python script to connect the pi with influx db and send data from sensors (percentage for the humidity sensor and litters for the flow sensor)
 
 ### Team Contribution
-- Student 1:
+- Student 1: 
 - Student 2:
