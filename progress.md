@@ -37,7 +37,7 @@ Update this file every week.
 ### In Progress
 - Sensor Calibration: i) Humidity Sensor: DRY_VALUE = 25350, WEB_VALUE = 8000 those values are approximate averages after some tests
 - Add a Zero Trust Network Access(using Twingate) to PI for remote access.
-- Sensor Calibration: i) Humidity Sensor: DRY_VALUE = 25350, WET_VALUE = 8000 those values are approximate averages after some tests
+
 
 
 
@@ -45,6 +45,20 @@ Update this file every week.
 - The flow sensor leaks when water comes through.
 
 - Write a python script to connect the pi with influx db and send data from sensors (percentage for the humidity sensor and litters for the flow sensor)
+
+
+## Week 3
+### Completed
+- Established a  data ingestion pipeline to our team's InfluxDB database, allowing us to visualize our telemetry in real-time on the Grafana dashboard.
+- The raw pulses from the water flow sensor were calibrated and converted into Liters, using a calculated factor of 613.3 pulses per liter.
+- The raw analog readings from the soil moisture sensor were mapped to a meaningful 0% to 100% percentage scale, based on empirical calibration tests (Dry value: 25350, Wet value: 8000).
+
+### In Progress
+
+
+### Problems / Risks
+- The script crasses after some minutes.
+
 
 ### Team Contribution
 - Student 1: 
