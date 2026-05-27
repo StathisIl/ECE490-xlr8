@@ -15,9 +15,10 @@ IfluxDB
 - dashboard / app
 Grafana
 - actuators / notifications
+Using Grafana contact point we can send an email notification to multiple users.
 
 ## Data Flow
-Describe how data moves through the system.
+Taking raw data from the sensors we are calculating percentage and liters of the sensors and we send a json file to 
 
 ## Decisions and Tradeoffs
 Explain key design choices.
