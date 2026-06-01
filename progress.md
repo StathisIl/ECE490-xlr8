@@ -49,3 +49,15 @@ Update this file every week.
 ### Team Contribution
 - Student 1: 
 - Student 2:
+
+## Week 3 
+### Completed 
+- Succesfully added weather api script to fetch current temp, 12hour rain probability in percentage, sunset and sunrise hours
+- Added a vps to run weather_api and brain 24/7 to be able to collect data.
+
+### In Progress
+- Writing main script brain.py, the main script making the decision making.
+- Still callibrating to get watering stats right.
+
+### Problems / Risks
+- 
