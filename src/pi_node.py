@@ -48,6 +48,7 @@ def count_pulse(*args):
 def setup_hardware():
     flow_sensor = Button(FLOW_SENSOR_PIN, pull_up=True)
     flow_sensor.when_pressed = count_pulse
+    return flow_sensor
 
 #  MQTT SETUP 
 def on_connect(client, userdata, flags, rc):
@@ -108,7 +109,7 @@ def main() -> None:
     global pulse_count
     print("Starting Edge Node...")
     
-    setup_hardware()
+    sensor_keepalive=setup_hardware()
     mqtt_client = setup_mqtt()
 
     try:
@@ -146,3 +147,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
