@@ -1,174 +1,108 @@
 import time
 import requests
-from datetime import datetime
 from requests.auth import HTTPBasicAuth
-import paho.mqtt.client as mqtt
 
-# --- 1. CONFIGURATION ---
-TEAM = "edge12"
-
-# InfluxDB Configuration
+# --- CONFIGURATION ΔΙΚΤΥΟΥ ---
 INFLUXDB_URL = "http://194.177.207.38:8086"
-DB_NAME = f"{TEAM}_db"
+DB_NAME = "edge12_db"
 DB_USERNAME = "edge12"
 DB_PASSWORD = "team1@#$"
+TEAM = "XLR8"
 
-# MQTT Configuration
-BROKER = "194.177.207.38"
-PORT = 1883
-MQTT_USERNAME = "team1"
-MQTT_PASSWORD = "team1!@#$"
+# --- ΟΡΙΑ ΑΠΟΦΑΣΗΣ (THRESHOLDS) ---
+CRITICAL_MOISTURE = 30.0          # Αν η υγρασία πέσει κάτω από 30%, το φυτό διψάει
+RAIN_PROBABILITY_THRESHOLD = 50   # Αν η πιθανότητα βροχής είναι >= 50%, ενεργοποιείται το Rain Delay
 
-# MQTT Topics sent by the Raspberry Pi
-HUMIDITY_TOPIC = f"sensors/{TEAM}/humidity"
-FLOW_TOPIC = f"sensors/{TEAM}/flow"
-
-# --- 2. THRESHOLDS (The Agricultural Rules) ---
-MOISTURE_THRESHOLD = 30.0   # If moisture >= 30%, do not water
-RAIN_THRESHOLD = 2.0        # If rain > 2.0mm, do not water
-TEMP_THRESHOLD = 32.0       # If temp > 32C, do not water
-FLOW_THRESHOLD = 0.5        # If flow >= 0.5 L/min, we consider it actively watering
-
-# --- 3. GLOBAL MEMORY ---
-# Stores the timestamp of the last detected water flow
-last_watering_time = 0.0
-
-
-# --- 4. HTTP FUNCTIONS (Database & Weather) ---
-def send_decision_to_influxdb(decision: int):
-    """Sends the final watering decision (0 or 1) to InfluxDB."""
-    url = f"{INFLUXDB_URL}/write"
-    params = {"db": DB_NAME}
-    auth = HTTPBasicAuth(DB_USERNAME, DB_PASSWORD)
-    line = f"watering_decision,team={TEAM} value={decision}"
-    
-    try:
-        requests.post(url, params=params, auth=auth, data=line, timeout=5)
-        print(f"[ACTION] Decision '{decision}' successfully written to InfluxDB.")
-    except Exception as e:
-        print(f"[ERROR] Could not write decision to DB: {e}")
-
-def get_latest_weather():
-    """Queries InfluxDB for the latest weather forecast."""
+def get_latest_value(measurement: str, field: str):
+    """
+    Κάνει query στην InfluxDB για να πάρει την τελευταία χρονικά τιμή
+    ενός συγκεκριμένου πεδίου από ένα συγκεκριμένο measurement.
+    """
     url = f"{INFLUXDB_URL}/query"
-    query = "SELECT temp, rain_12h, sunrise, sunset FROM weather_forecast ORDER BY time DESC LIMIT 1"
-    params = {"db": DB_NAME, "q": query}
+
+    # SQL-like ερώτημα στην InfluxDB για την τελευταία καταγραφή της ομάδας μας
+    query = f'SELECT last("{field}") FROM "{measurement}" WHERE "team"=\'{TEAM}\''
+
+    params = {
+        "db": DB_NAME,
+        "q": query
+    }
     auth = HTTPBasicAuth(DB_USERNAME, DB_PASSWORD)
-    
+
     try:
         response = requests.get(url, params=params, auth=auth, timeout=5)
+        response.raise_for_status()
         data = response.json()
-        series = data.get("results", [])[0].get("series", [])
-        if not series: 
-            return None
-        return dict(zip(series[0]["columns"], series[0]["values"][0]))
-    except Exception as e:
-        print(f"[ERROR] Failed to fetch weather data: {e}")
+
+        # Αποσυμπίεση του σύνθετου JSON που επιστρέφει η InfluxDB
+        if "results" in data and len(data["results"]) > 0:
+            result = data["results"][0]
+            if "series" in result and len(result["series"]) > 0:
+                series = result["series"][0]
+                if "values" in series and len(series["values"]) > 0:
+                    # Το values[0][0] είναι το timestamp, το values[0][1] είναι η τιμή
+                    return float(series["values"][0][1])
+
+        print(f"⚠️ [Προειδοποίηση] Δεν βρέθηκαν δεδομένα για το πεδίο '{field}' στο measurement '{measurement}'.")
         return None
 
-
-# --- 5. THE DECISION ENGINE ---
-def make_watering_decision(moisture: float) -> int:
-    """Evaluates all conditions and returns 1 (Water) or 0 (Do not water)."""
-    global last_watering_time
-
-    # 1. Flow Sensor Check (Did we water in the last 10 minutes?)
-    current_time = time.time()
-    if (current_time - last_watering_time) < 600: # 600 seconds = 10 minutes
-        print("[LOGIC] Watering occurred in the last 10 minutes! Status reset to 0.")
-        return 0
-
-    # 2. Moisture Check
-    if moisture >= MOISTURE_THRESHOLD:
-        print(f"[LOGIC] Soil is sufficiently wet ({moisture}%). No watering needed.")
-        return 0
-
-    print(f"[LOGIC] Soil is dry ({moisture}%). Evaluating weather conditions...")
-
-    # 3. Weather Checks
-    weather = get_latest_weather()
-    if not weather:
-        print("[LOGIC] WARNING: No weather data available. Defaulting to safe mode (0).")
-        return 0
-
-    temp = float(weather.get("temp", 0))
-    rain = float(weather.get("rain_12h", 0))
-    sunrise_str = weather.get("sunrise", "")
-    sunset_str = weather.get("sunset", "")
-
-    if rain >= RAIN_THRESHOLD:
-        print(f"[LOGIC] Rain forecasted ({rain}mm in next 12h). Skipping watering.")
-        return 0
-
-    if temp >= TEMP_THRESHOLD:
-        print(f"[LOGIC] Heatwave detected ({temp}°C). Skipping to avoid plant shock.")
-        return 0
-
-    # 4. Time Check (Timezone safe calculation for Greece)
-    try:
-        sunrise_hour = datetime.strptime(sunrise_str, "%Y-%m-%dT%H:%M").hour
-        sunset_hour = datetime.strptime(sunset_str, "%Y-%m-%dT%H:%M").hour
-        current_hour = (datetime.utcnow().hour + 3) % 24  # UTC+3 for Greece Summer Time
-        
-        if sunrise_hour <= current_hour < sunset_hour:
-            print(f"[LOGIC] It is daytime (Current hour: {current_hour}:00). Skipping to avoid rapid evaporation.")
-            return 0
     except Exception as e:
-        print(f"[LOGIC] Time parsing error: {e}")
-        pass
-        
-    print("[LOGIC] ✅ ALL CONDITIONS MET. GREEN LIGHT TO WATER!")
-    return 1
+        print(f"❌ [Σφάλμα Βάσης] Αποτυχία ανάγνωσης του {field}: {e}")
+        return None
 
+def make_decision(moisture: float, rain_prob: float):
+    """
+    Ο Εγκέφαλος του συστήματος: Συγκρίνει τις τιμές και παίρνει την απόφαση.
+    """
+    print("\n" + "="*50)
+    print(" 🧠 SMART IRRIGATION SYSTEM: DECISION ENGINE")
+    print("="*50)
+    print(f" 📊 Υγρασία Χώματος  : {moisture:.1f}%")
+    print(f" ☁️  Πιθανότητα Βροχής: {rain_prob:.1f}%\n")
 
-# --- 6. MQTT CALLBACKS ---
-def on_connect(client, userdata, flags, rc, properties=None):
-    """Triggered upon successful connection to the MQTT Broker."""
-    if rc == 0:
-        print("[MQTT] Connected to Broker successfully!")
-        client.subscribe(HUMIDITY_TOPIC)
-        client.subscribe(FLOW_TOPIC)
-        print(f"[MQTT] Listening to topic: {HUMIDITY_TOPIC}")
-        print(f"[MQTT] Listening to topic: {FLOW_TOPIC}")
+    # ΣΕΝΑΡΙΟ 1: Το χώμα είναι στεγνό (Κάτω από το όριο)
+    if moisture < CRITICAL_MOISTURE:
+
+        # Έλεγχος για Rain Delay Policy
+        if rain_prob >= RAIN_PROBABILITY_THRESHOLD:
+            print(" ⏳ [STATUS: RAIN DELAY POLICY - ACTIVE]")
+            print("    ΛΟΓΟΣ   : Το χώμα είναι ξηρό, αλλά η πιθανότητα βροχής είναι υψηλή.")
+            print("    ΕΝΕΡΓΕΙΑ: Αναβολή αυτόματου ποτίσματος για εξοικονόμηση νερού.")
+
+        # Αν δεν αναμένεται βροχή, στέλνουμε Alert
+        else:
+            print(" 🚨 [STATUS: CRITICAL ALERT - ACTION REQUIRED]")
+            print("    ΛΟΓΟΣ   : Το χώμα είναι ξηρό και δεν προβλέπεται βροχή.")
+            print("    ΕΝΕΡΓΕΙΑ: ΞΕΚΙΝΗΣΤΕ ΤΟ ΠΟΤΙΣΜΑ ΑΜΕΣΑ!")
+
+    # ΣΕΝΑΡΙΟ 2: Το χώμα έχει αρκετή υγρασία
     else:
-        print(f"[MQTT] Connection failed with code {rc}")
+        print(" ✅ [STATUS: SYSTEM NOMINAL]")
+        print("    ΛΟΓΟΣ   : Η υγρασία του εδάφους είναι σε ιδανικά επίπεδα.")
+        print("    ΕΝΕΡΓΕΙΑ: Καμία ενέργεια. Το σύστημα παραμένει σε αναμονή.")
 
-def on_message(client, userdata, msg):
-    """Triggered every time a message is published to the subscribed topics."""
-    global last_watering_time
-    payload = msg.payload.decode("utf-8").strip()
-    topic = msg.topic
+    print("="*50 + "\n")
 
-    try:
-        value = float(payload)
-        
-        # --- IF WATER FLOW DATA IS RECEIVED ---
-        if topic == FLOW_TOPIC:
-            if value >= FLOW_THRESHOLD:
-                last_watering_time = time.time()
-                print(f"\n[SENSOR] Water is currently flowing! ({value} L/min). Watering timer reset.")
-                
-        # --- IF MOISTURE DATA IS RECEIVED ---
-        elif topic == HUMIDITY_TOPIC:
-            print(f"\n{'='*50}\n[SENSOR] New moisture reading received: {value}%")
-            decision = make_watering_decision(value)
-            send_decision_to_influxdb(decision)
-            
-    except ValueError:
-        print(f"[ERROR] Received non-numeric payload on {topic}: {payload}")
+def main():
+    print("🤖 Ο Έξυπνος Εγκέφαλος (Brain) ξεκίνησε τη λειτουργία του...")
+    print(f"Κάνει έλεγχο δεδομένων κάθε 60 δευτερόλεπτα.\n")
 
+    while True:
+        # 1. Διαβάζει την τελευταία υγρασία από το 'telemetry' που γράφει το Pi
+        latest_moisture = get_latest_value("telemetry", "moisture_percent")
 
-# --- 7. MAIN EXECUTION ---
+        # 2. Διαβάζει την πιθανότητα βροχής από το 'weather_forecast'
+        # (Σημείωση: Αν στο δικό σου weather script το ονομάσεις αλλιώς, άλλαξέ το εδώ!)
+        latest_rain_prob = get_latest_value("weather_forecast", "rain_probability")
+
+        # 3. Αν υπάρχουν και οι δύο μετρήσεις στη βάση, τρέχει τη λογική
+        if latest_moisture is not None and latest_rain_prob is not None:
+            make_decision(latest_moisture, latest_rain_prob)
+        else:
+            print("⏳ Αναμονή για λήψη έγκυρων δεδομένων από την InfluxDB...")
+
+        # Περιμένει 1 λεπτό πριν τον επόμενο έλεγχο
+        time.sleep(5)
+
 if __name__ == "__main__":
-    print("[SYSTEM] Starting Central Brain Node...")
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-    client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
-    
-    client.on_connect = on_connect
-    client.on_message = on_message
-    
-    print("[SYSTEM] Connecting to MQTT Broker...")
-    client.connect(BROKER, PORT)
-    
-    # Keeps the script running and listening to MQTT forever
-    client.loop_forever()
+    main()
