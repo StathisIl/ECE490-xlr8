@@ -13,7 +13,7 @@ from adafruit_ads1x15.analog_in import AnalogIn
 # --- CONFIGURATION ---
 BROKER = "194.177.207.38"
 PORT = 1883
-TEAM = "XLR8"
+TEAM = "edge12"
 
 MQTT_USERNAME = "team1"
 MQTT_PASSWORD = "team1!@#$"
