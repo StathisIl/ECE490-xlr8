@@ -30,20 +30,17 @@ def fetch_weather():
         "hourly": "temperature_2m,rain,precipitation_probability",
         "daily": "sunrise,sunset",
         "timezone": "auto",
-        "forecast_days": 2  
+        "forecast_days": 2  # 2 days ensures we have enough data if we check late at night
     }
     
     try:
         response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status() 
+        response.raise_for_status() # Raise an exception for bad HTTP status codes
         data = response.json()
 
-        # --- ΝΕΟ ΚΟΜΜΑΤΙ ΓΙΑ ΤΗΝ ΩΡΑ ---
         # Παίρνουμε την τρέχουσα θερμοκρασία και την ώρα της μέτρησης από το API
         current_temp = data["current"]["temperature_2m"]
-        api_time_raw = data["current"]["time"] # Έρχεται σε μορφή "2024-06-06T21:00"
-        
-        # Αντικαθιστούμε το "T" με ένα κενό για να διαβάζεται πιο ωραία στο τερματικό μας
+        api_time_raw = data["current"]["time"] 
         api_time_clean = api_time_raw.replace("T", " ")
 
         # Get the current hour (0-23) to use as the starting index for forecasts
@@ -64,11 +61,11 @@ def fetch_weather():
         sunrise = data["daily"]["sunrise"][0]
         sunset = data["daily"]["sunset"][0]
 
-        # ΤΥΠΩΝΟΥΜΕ ΤΗΝ ΩΡΑ ΤΟΥ API ΜΑΖΙ ΜΕ ΤΗ ΘΕΡΜΟΚΡΑΣΙΑ
         print(f"[WEATHER] Ώρα Μέτρησης (API): {api_time_clean} | Τρέχουσα Θερμοκρασία: {current_temp}°C")
         print(f"[WEATHER] Πρόβλεψη 12h -> Βροχή: {total_rain_mm}mm, Πιθανότητα: {max_rain_prob}%")
 
         # Format the data into InfluxDB Line Protocol
+        # ΔΙΟΡΘΩΣΗ ΕΔΩ: Αλλάξαμε το "temp" σε "temperature" για να το διαβάζει ο Εγκέφαλος!
         line = (
             f"weather_forecast,team={TEAM} "
             f"temperature={current_temp},rain_12h={total_rain_mm},rain_prob_12h={max_rain_prob},"
