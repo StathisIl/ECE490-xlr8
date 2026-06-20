@@ -21,7 +21,7 @@ LONGITUDE = 22.94
 
 # --- 2. WEATHER FETCH FUNCTION ---
 def fetch_weather():
-    """Fetches weather data from Open-Meteo and calculates 12-hour forecasts."""
+    """Fetches weather data from Open-Meteo and calculates past & future forecasts."""
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
         "latitude": LATITUDE,
@@ -30,48 +30,55 @@ def fetch_weather():
         "hourly": "temperature_2m,rain,precipitation_probability",
         "daily": "sunrise,sunset",
         "timezone": "auto",
-        "forecast_days": 2  
+        "past_days": 1,     # ΝΕΟ: Ζητάμε και δεδομένα από τη χθεσινή μέρα για το παρελθόν
+        "forecast_days": 2  # 2 days ensures we have enough data if we check late at night
     }
     
     try:
         response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status() 
+        response.raise_for_status() # Raise an exception for bad HTTP status codes
         data = response.json()
 
-        # --- ΝΕΟ ΚΟΜΜΑΤΙ ΓΙΑ ΤΗΝ ΩΡΑ ---
         # Παίρνουμε την τρέχουσα θερμοκρασία και την ώρα της μέτρησης από το API
         current_temp = data["current"]["temperature_2m"]
-        api_time_raw = data["current"]["time"] # Έρχεται σε μορφή "2024-06-06T21:00"
-        
-        # Αντικαθιστούμε το "T" με ένα κενό για να διαβάζεται πιο ωραία στο τερματικό μας
+        api_time_raw = data["current"]["time"] 
         api_time_clean = api_time_raw.replace("T", " ")
 
-        # Get the current hour (0-23) to use as the starting index for forecasts
-        current_hour = datetime.now().hour
+        # Βρίσκουμε το Index της τρέχουσας ώρας μέσα στη μεγάλη λίστα του API
+        current_time_str = data["current"]["time"][:14] + "00" 
+        try:
+            current_hour_index = data["hourly"]["time"].index(current_time_str)
+        except ValueError:
+            print("[ERROR] Δεν βρέθηκε η ώρα στον πίνακα του API.")
+            return None
 
         # Extract the hourly data arrays
         hourly_probs = data["hourly"]["precipitation_probability"]
         hourly_rain = data["hourly"]["rain"]
 
-        # Slice the arrays to get only the next 12 hours
-        next_12h_probs = hourly_probs[current_hour : current_hour + 12]
-        next_12h_rain = hourly_rain[current_hour : current_hour + 12]
-
-        # Calculate final metrics
+        # --- ΜΕΛΛΟΝ (12h Πρόβλεψη) ---
+        next_12h_probs = hourly_probs[current_hour_index : current_hour_index + 12]
+        next_12h_rain = hourly_rain[current_hour_index : current_hour_index + 12]
         max_rain_prob = max(next_12h_probs)
         total_rain_mm = round(sum(next_12h_rain), 2)
 
-        sunrise = data["daily"]["sunrise"][0]
-        sunset = data["daily"]["sunset"][0]
+        # --- ΠΑΡΕΛΘΟΝ (Τι έβρεξε ΠΡΑΓΜΑΤΙΚΑ τις τελ. 6h) ---
+        past_6h_rain = hourly_rain[current_hour_index - 6 : current_hour_index]
+        actual_rain_6h = round(sum(past_6h_rain), 2)
 
-        # ΤΥΠΩΝΟΥΜΕ ΤΗΝ ΩΡΑ ΤΟΥ API ΜΑΖΙ ΜΕ ΤΗ ΘΕΡΜΟΚΡΑΣΙΑ
+        # Ήλιος (Index 1 αντί για 0, επειδή βάλαμε το past_days=1)
+        sunrise = data["daily"]["sunrise"][1]
+        sunset = data["daily"]["sunset"][1]
+
         print(f"[WEATHER] Ώρα Μέτρησης (API): {api_time_clean} | Τρέχουσα Θερμοκρασία: {current_temp}°C")
+        print(f"[WEATHER] ΠΑΡΕΛΘΟΝ 6h -> Έπεσαν πραγματικά: {actual_rain_6h}mm")
         print(f"[WEATHER] Πρόβλεψη 12h -> Βροχή: {total_rain_mm}mm, Πιθανότητα: {max_rain_prob}%")
 
-        # Format the data into InfluxDB Line Protocol
+        # Format the data into InfluxDB Line Protocol (Προστέθηκε το actual_rain_6h)
         line = (
             f"weather_forecast,team={TEAM} "
             f"temperature={current_temp},rain_12h={total_rain_mm},rain_prob_12h={max_rain_prob},"
+            f"actual_rain_6h={actual_rain_6h},"
             f"sunrise=\"{sunrise}\",sunset=\"{sunset}\""
         )
         return line
