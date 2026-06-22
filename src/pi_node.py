@@ -1,150 +1,189 @@
-import time
-import socket
 import json
-import paho.mqtt.client as mqtt
-import requests
-from requests.auth import HTTPBasicAuth
-from gpiozero import Button
+import time
+from datetime import datetime, timezone
+
 import board
-import busio
-import adafruit_ads1x15.ads1015 as ADS
+import paho.mqtt.client as mqtt
 from adafruit_ads1x15.analog_in import AnalogIn
+import adafruit_ads1x15.ads1015 as ADS
+from gpiozero import Button
 
 # --- CONFIGURATION ---
 BROKER = "194.177.207.38"
 PORT = 1883
 TEAM = "edge12"
+MQTT_TEAM = "XLR8"
 
 MQTT_USERNAME = "team1"
 MQTT_PASSWORD = "team1!@#$"
-MQTT_TOPIC = f"sensors/{TEAM}/telemetry"
+TELEMETRY_TOPIC = f"iot/{MQTT_TEAM}/telemetry/soilMoisture"
+COMMAND_TOPIC = f"iot/{MQTT_TEAM}/control/irrigation"
 
-INFLUXDB_URL = "http://194.177.207.38:8086"
-DB_NAME = "edge12_db"
-DB_USERNAME = "edge12"
-DB_PASSWORD = "team1@#$"
+# Dynamic Duty Cycling default, updated by SET_SLEEP MQTT commands.
+sleep_interval_seconds = 5
 
 # Flow sensor calibration
-PULSES_PER_LITER = 613.3
-
-
-# Number when sensor is dry
-DRY_VALUE = 25350.0  
-# Number when sensor is completely submerged in water
-WET_VALUE = 8000.0  
-
-# HARDWARE SETUP 
+PULSES_PER_LITER = 1621.3
 FLOW_SENSOR_PIN = 17
+
+# Soil moisture calibration
+DRY_VALUE = 26300.0
+WET_VALUE = 7000.0
+
 pulse_count = 0
 
+# --- HARDWARE SETUP ---
 i2c = board.I2C()
 ads = ADS.ADS1015(i2c)
 moisture_chan = AnalogIn(ads, 0)
 
-def count_pulse(*args):
+
+def count_pulse(*_args):
     global pulse_count
     pulse_count += 1
+
 
 def setup_hardware():
     flow_sensor = Button(FLOW_SENSOR_PIN, pull_up=True)
     flow_sensor.when_pressed = count_pulse
     return flow_sensor
 
-#  MQTT SETUP 
-def on_connect(client, userdata, flags, rc):
-    if rc == 0:
+
+# --- MQTT CALLBACKS ---
+def on_connect(client, _userdata, _flags, reason_code, _properties=None):
+    if reason_code == 0:
         print("[MQTT] Connected to broker.")
+        client.subscribe(COMMAND_TOPIC, qos=1)
+        print(f"[MQTT] Listening for commands on {COMMAND_TOPIC}")
     else:
-        print(f"[MQTT] Connection failed (code {rc})")
+        print(f"[MQTT] Connection failed: {reason_code}")
+
+
+def on_message(_client, _userdata, message):
+    global sleep_interval_seconds
+
+    if message.topic != COMMAND_TOPIC:
+        return
+
+    try:
+        command = json.loads(message.payload.decode("utf-8"))
+
+        if command.get("command") == "SET_SLEEP":
+            new_interval = int(command["value"])
+
+            if new_interval < 1 or new_interval > 86400:
+                raise ValueError("Sleep interval must be between 1 and 86400 seconds.")
+
+            sleep_interval_seconds = new_interval
+            print(f"[COMMAND] Sleep interval updated to {sleep_interval_seconds} seconds.")
+        else:
+            print(f"[COMMAND] Unsupported command: {command}")
+
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        print(f"[COMMAND] Invalid command payload: {exc}")
+
+
+def on_publish(_client, _userdata, mid, _reason_code=None, _properties=None):
+    print(f"[MQTT] Broker acknowledged QoS 1 telemetry (message id: {mid}).")
+
+
+def on_disconnect(_client, _userdata, disconnect_flags, reason_code, _properties=None):
+    print(f"[MQTT] Disconnected from broker. Reason: {reason_code}")
 
 def setup_mqtt():
-    client = mqtt.Client(client_id=TEAM)
+    client = mqtt.Client(
+        mqtt.CallbackAPIVersion.VERSION2,
+        client_id=f"{MQTT_TEAM}-pi",
+    )
     client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
     client.on_connect = on_connect
-    try:
-        client.connect(BROKER, PORT, 60)
-        client.loop_start()
-        return client
-    except Exception as e:
-        print(f"[MQTT] Connection error: {e}")
-        return None
+    client.on_message = on_message
+    client.on_publish = on_publish
+    client.on_disconnect = on_disconnect
+    client.reconnect_delay_set(min_delay=1, max_delay=30)
 
-# INFLUXDB DIRECT WRITE
-def write_to_influxdb(moisture_pct: float, liters: float):
-    url = f"{INFLUXDB_URL}/write"
-    params = {"db": DB_NAME}
-    auth = HTTPBasicAuth(DB_USERNAME, DB_PASSWORD)
-    
-    # Format data for InfluxDB 
-    line = f"telemetry,team={TEAM} moisture_percent={moisture_pct:.1f},water_liters={liters:.3f}"
-    
-    try:
-        response = requests.post(url, params=params, auth=auth, data=line, timeout=2)
-        if response.status_code in (200, 204):
-            print(f"[InfluxDB] Success: {line}")
-        else:
-            print(f"[InfluxDB] Error {response.status_code}: {response.text}")
-    except requests.RequestException as e:
-        print(f"[InfluxDB] Connection error: {e}")
+    client.connect(BROKER, PORT, keepalive=60)
+    client.loop_start()
+    return client
 
-# PUBLISH DATA 
-def publish_data(client, moisture_pct, liters):
-    #  Write directly to InfluxDB (For Grafana)
-    write_to_influxdb(moisture_pct, liters)
 
-    # 2. Publish to MQTT (For project requirements)
-    if client is not None:
-        payload = {
-            "team": TEAM,
-            "moisture_percent": round(moisture_pct, 1),
-            "water_liters": round(liters, 3),
-            "timestamp": int(time.time())
-        }
-        json_message = json.dumps(payload)
-        client.publish(MQTT_TOPIC, json_message)
-        print(f"[MQTT] Sent: {json_message}")
+# --- NGSI-LD TELEMETRY ---
+def build_ngsi_ld_payload(moisture_percent: float, water_liters: float) -> dict:
+    observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
-#  MAIN LOOP 
-def main() -> None:
+    return {
+        "@context": [
+            "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context.jsonld"
+        ],
+        "id": f"urn:ngsi-ld:AgriSoil:{TEAM}",
+        "type": "AgriSoil",
+        "moisture_percent": {
+            "type": "Property",
+            "value": round(moisture_percent, 1),
+            "unitCode": "P1",
+            "observedAt": observed_at,
+        },
+        "water_liters": {
+            "type": "Property",
+            "value": round(water_liters, 3),
+            "unitCode": "LTR",
+            "observedAt": observed_at,
+        },
+    }
+
+
+def publish_data(client, moisture_percent: float, water_liters: float):
+    payload = build_ngsi_ld_payload(moisture_percent, water_liters)
+    payload_json = json.dumps(payload)
+
+    # QoS 1 guarantees at-least-once delivery to the broker.
+    result = client.publish(TELEMETRY_TOPIC, payload_json, qos=1)
+
+    if result.rc == mqtt.MQTT_ERR_SUCCESS:
+        print(f"[MQTT] Published QoS 1 telemetry: {payload_json}")
+    else:
+        print(f"[MQTT] Publish failed with code {result.rc}")
+
+
+def calculate_moisture_percent(raw_value: float) -> float:
+    if DRY_VALUE == WET_VALUE:
+        return 0.0
+
+    moisture = 100.0 * (DRY_VALUE - raw_value) / (DRY_VALUE - WET_VALUE)
+    return max(0.0, min(100.0, moisture))
+
+
+def main():
     global pulse_count
-    print("Starting Edge Node...")
-    
-    sensor_keepalive=setup_hardware()
+
+    print("[SYSTEM] Starting Edge Node...")
+    sensor_keepalive = setup_hardware()  # Prevents GPIO object garbage collection.
     mqtt_client = setup_mqtt()
 
     try:
         while True:
-            #. Read raw sensor values
-            current_raw_moisture = moisture_chan.value
+            raw_moisture = moisture_chan.value
+
             current_pulses = pulse_count
-            pulse_count = 0  # Reset pulse counter for the next loop
-            
-            #  Convert raw pulses to liters
+            pulse_count = 0
+
+            moisture_percent = calculate_moisture_percent(raw_moisture)
             water_liters = current_pulses / PULSES_PER_LITER
-            
-            # Convert raw moisture to percentage (0% to 100%)
-            if DRY_VALUE != WET_VALUE:
-                moisture_percent = 100.0 * (DRY_VALUE - current_raw_moisture) / (DRY_VALUE - WET_VALUE)
-            else:
-                moisture_percent = 0.0
-                
-            # Keep percentage strictly between 0 and 100 (clamp)
-            moisture_percent = max(0.0, min(100.0, moisture_percent))
-            
-            #  Send the processed data
+
             publish_data(mqtt_client, moisture_percent, water_liters)
-            
-            # Wait 5 seconds
-            time.sleep(5)
-            
+
+            print(f"[SYSTEM] Sleeping for {sleep_interval_seconds} seconds.")
+            time.sleep(sleep_interval_seconds)
+
     except KeyboardInterrupt:
-        print("\nStopped by user.")
+        print("\n[SYSTEM] Stopped by user.")
+
     finally:
-        if mqtt_client is not None:
-            mqtt_client.loop_stop()
-            mqtt_client.disconnect()
-        print("Cleanup complete.")
+        mqtt_client.loop_stop()
+        mqtt_client.disconnect()
+        del sensor_keepalive
+        print("[SYSTEM] Cleanup complete.")
+
 
 if __name__ == "__main__":
     main()
-
