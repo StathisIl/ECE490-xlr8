@@ -1,185 +1,319 @@
-import os
-import time
-import requests
+import json
 from datetime import datetime
+
+import paho.mqtt.client as mqtt
+import requests
 from requests.auth import HTTPBasicAuth
 
-# --- ΕΠΙΒΟΛΗ ΕΛΛΗΝΙΚΗΣ ΩΡΑΣ (ΠΑΡΑΚΑΜΨΗ ΤΟΥ ΛΕΙΤΟΥΡΓΙΚΟΥ) ---
-os.environ['TZ'] = 'Europe/Athens'
-time.tzset()
+# --- MQTT CONFIGURATION ---
+BROKER = "194.177.207.38"
+PORT = 1883
+TEAM = "edge12"
+MQTT_TEAM = "XLR8"
 
-# --- CONFIGURATION ΔΙΚΤΥΟΥ ---
+MQTT_USERNAME = "team1"
+MQTT_PASSWORD = "team1!@#$"
+TELEMETRY_TOPIC = f"iot/{MQTT_TEAM}/telemetry/soilMoisture"
+COMMAND_TOPIC = f"iot/{MQTT_TEAM}/control/irrigation"
+
+# --- INFLUXDB CONFIGURATION ---
 INFLUXDB_URL = "http://194.177.207.38:8086"
-DB_NAME = "edge12_db"
+DB_NAME = f"{TEAM}_db"
 DB_USERNAME = "edge12"
 DB_PASSWORD = "team1@#$"
-TEAM = "edge12"
 
-# --- ΟΙ 7 ΧΡΥΣΟΙ ΚΑΝΟΝΕΣ ΠΟΤΙΣΜΑΤΟΣ (THRESHOLDS) ---
-COOLDOWN_MINUTES = 10             # Κανόνας 1: Αναμονή μετά το πότισμα (Λεπτά)
-CRITICAL_MOISTURE = 30.0          # Κανόνας 2: Όριο επαρκούς υγρασίας (%)
-RAIN_PROBABILITY_THRESHOLD = 60.0 # Κανόνας 3: Όριο πιθανότητας βροχής (%)
-RAIN_VOLUME_THRESHOLD = 2.0       # Κανόνας 4: Αναμενόμενος όγκος βροχής (mm)
-HEATWAVE_THRESHOLD = 32.0         # Κανόνας 5: Όριο καύσωνα (°C)
-ACTUAL_RAIN_THRESHOLD = 2.0       # Κανόνας 7: Πραγματική βροχή παρελθόντος (mm)
+# --- IRRIGATION RULES ---
+MOISTURE_THRESHOLD = 35.0
+COOLDOWN_MINUTES = 10
+RAIN_PROBABILITY_THRESHOLD = 60.0
+RAIN_VOLUME_THRESHOLD = 2.0
+HEATWAVE_THRESHOLD = 32.0
+ACTUAL_RAIN_THRESHOLD = 2.0
 
-# --- ΣΥΝΑΡΤΗΣΕΙΣ ΒΑΣΗΣ ΔΕΔΟΜΕΝΩΝ ---
+# Dynamic Duty Cycling policy
+SLEEP_NORMAL_SECONDS = 5
+SLEEP_DRY_SECONDS = 5
+SLEEP_RAIN_DELAY_SECONDS = 5
+
+
+def influx_auth():
+    return HTTPBasicAuth(DB_USERNAME, DB_PASSWORD)
+
+
+def escape_influx_string(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def write_to_influxdb(line_protocol: str):
+    """Write a line-protocol record to InfluxDB."""
+    response = requests.post(
+        f"{INFLUXDB_URL}/write",
+        params={"db": DB_NAME},
+        auth=influx_auth(),
+        data=line_protocol,
+        timeout=5,
+    )
+    response.raise_for_status()
+
+
+def write_telemetry(moisture_percent: float, water_liters: float):
+    line = (
+        f"telemetry,team={TEAM} "
+        f"moisture_percent={moisture_percent:.1f},"
+        f"water_liters={water_liters:.3f}"
+    )
+    write_to_influxdb(line)
+    print(f"[DATABASE] Telemetry written: {line}")
+
+
+def write_decision(action: int, rule_id: int, status_message: str):
+    line = (
+        f"decision_log,team={TEAM} "
+        f"action={action},"
+        f"active_rule={rule_id},"
+        f"status_msg=\"{escape_influx_string(status_message)}\""
+    )
+    write_to_influxdb(line)
+    print(f"[DATABASE] Decision written: {status_message}")
+
+
+def query_influx(query: str):
+    response = requests.get(
+        f"{INFLUXDB_URL}/query",
+        params={"db": DB_NAME, "q": query},
+        auth=influx_auth(),
+        timeout=5,
+    )
+    response.raise_for_status()
+    return response.json()
+
+def on_log(_client, _userdata, _level, buffer):
+    print(f"[MQTT DEBUG] {buffer}")
 
 def get_latest_value(measurement: str, field: str, as_string: bool = False):
-    """Κάνει query στην InfluxDB για την τελευταία τιμή."""
-    url = f"{INFLUXDB_URL}/query"
-    query = f'SELECT last("{field}") FROM "{measurement}" WHERE "team"=\'{TEAM}\''
-    params = {"db": DB_NAME, "q": query}
-    auth = HTTPBasicAuth(DB_USERNAME, DB_PASSWORD)
+    query = (
+        f'SELECT last("{field}") FROM "{measurement}" '
+        f'WHERE "team"=\'{TEAM}\''
+    )
 
     try:
-        response = requests.get(url, params=params, auth=auth, timeout=5)
-        response.raise_for_status()
-        data = response.json()
-        if "results" in data and len(data["results"]) > 0:
-            result = data["results"][0]
-            if "series" in result and len(result["series"]) > 0:
-                val = result["series"][0]["values"][0][1]
-                return str(val) if as_string else float(val)
-        return None
-    except Exception as e:
-        print(f"❌ [Σφάλμα Βάσης] Αποτυχία ανάγνωσης του {field}: {e}")
+        data = query_influx(query)
+        series = data["results"][0].get("series", [])
+        if not series:
+            return None
+
+        value = series[0]["values"][0][1]
+        return str(value) if as_string else float(value)
+
+    except (requests.RequestException, KeyError, IndexError, TypeError, ValueError) as exc:
+        print(f"[DATABASE] Failed to read {measurement}.{field}: {exc}")
         return None
 
-def check_recent_watering(minutes: int) -> float:
-    """Ρωτάει την InfluxDB πόσα λίτρα νερού έπεσαν τα τελευταία X λεπτά."""
-    url = f"{INFLUXDB_URL}/query"
-    query = f'SELECT sum("water_liters") FROM "telemetry" WHERE "team"=\'{TEAM}\' AND time >= now() - {minutes}m'
-    params = {"db": DB_NAME, "q": query}
-    auth = HTTPBasicAuth(DB_USERNAME, DB_PASSWORD)
+
+def get_recent_water_liters(minutes: int) -> float:
+    query = (
+        f'SELECT sum("water_liters") FROM "telemetry" '
+        f'WHERE "team"=\'{TEAM}\' AND time >= now() - {minutes}m'
+    )
 
     try:
-        response = requests.get(url, params=params, auth=auth, timeout=5)
-        response.raise_for_status()
-        data = response.json()
-        if "results" in data and len(data["results"]) > 0:
-            result = data["results"][0]
-            if "series" in result and len(result["series"]) > 0:
-                return float(result["series"][0]["values"][0][1])
-        return 0.0 
-    except Exception:
+        data = query_influx(query)
+        series = data["results"][0].get("series", [])
+        return float(series[0]["values"][0][1]) if series else 0.0
+    except (requests.RequestException, KeyError, IndexError, TypeError, ValueError):
         return 0.0
 
-def send_decision_to_influxdb(action: int, rule_id: int, status_msg: str):
-    """Στέλνει την τελική απόφαση και το status/rule στην InfluxDB για το Grafana."""
-    url = f"{INFLUXDB_URL}/write"
-    params = {"db": DB_NAME}
-    auth = HTTPBasicAuth(DB_USERNAME, DB_PASSWORD)
-    
-    # Προσοχή: Το string status_msg θέλει διπλά εισαγωγικά στην InfluxDB
-    line = f'decision_log,team={TEAM} action={action},active_rule={rule_id},status_msg="{status_msg}"'
-    
-    try:
-        requests.post(url, params=params, auth=auth, data=line, timeout=5)
-    except Exception as e:
-        print(f"❌ [Σφάλμα Βάσης] Αποτυχία εγγραφής Απόφασης: {e}")
 
-# --- ΣΥΝΑΡΤΗΣΕΙΣ ΛΟΓΙΚΗΣ ---
-
-def is_daytime(sunrise_str: str, sunset_str: str) -> bool:
+def is_daytime(sunrise: str, sunset: str) -> bool:
     try:
-        sunrise_str = sunrise_str.replace('"', '')
-        sunset_str = sunset_str.replace('"', '')
-        
-        sunrise_dt = datetime.strptime(sunrise_str, "%Y-%m-%dT%H:%M")
-        sunset_dt = datetime.strptime(sunset_str, "%Y-%m-%dT%H:%M")
-        now = datetime.now() 
-        
+        sunrise_dt = datetime.fromisoformat(sunrise.replace("Z", "+00:00"))
+        sunset_dt = datetime.fromisoformat(sunset.replace("Z", "+00:00"))
+        now = datetime.now(sunrise_dt.tzinfo)
         return sunrise_dt <= now <= sunset_dt
-    except Exception as e:
-        current_hour = datetime.now().hour
-        return 7 <= current_hour <= 20
+    except (TypeError, ValueError):
+        hour = datetime.now().hour
+        return 7 <= hour <= 20
 
-def make_decision(moisture, rain_prob, rain_vol, actual_rain, temp, recent_water, sunrise_str, sunset_str):
+
+def get_weather():
+    """Return latest weather values written by weather_api.py."""
+    weather = {
+        "temperature": get_latest_value("weather_forecast", "temperature"),
+        "rain_probability": get_latest_value("weather_forecast", "rain_prob_12h"),
+        "rain_volume": get_latest_value("weather_forecast", "rain_12h"),
+        "actual_rain": get_latest_value("weather_forecast", "actual_rain_6h"),
+        "sunrise": get_latest_value("weather_forecast", "sunrise", as_string=True),
+        "sunset": get_latest_value("weather_forecast", "sunset", as_string=True),
+    }
+
+    if any(value is None for value in weather.values()):
+        return None
+
+    return weather
+
+
+def evaluate_rules(moisture: float, weather: dict | None, recent_water: float):
     """
-    Ελέγχει τους κανόνες και ΕΠΙΣΤΡΕΦΕΙ (action, rule_id, status_message).
+    Seven-rule decision engine.
+
+    Rule 2 is evaluated first for normal moisture levels. Weather is queried
+    only when moisture is below 25%, satisfying the Rain Delay policy flow.
     """
-    print("\n" + "="*55)
-    print(" 🧠 SMART IRRIGATION: DECISION ENGINE (7 RULES)")
-    print("="*55)
-    print(f" 📊 Υγρασία Εδάφους: {moisture:.1f}%")
-    print(f" 🌡️ Θερμοκρασία    : {temp:.1f} °C")
-    print(f" ☁️ Βροχή (12h)    : Πιθανότητα {rain_prob:.1f}% | Όγκος {rain_vol} mm")
-    print(f" 🌧️ Βροχή (παρ.6h) : {actual_rain} mm")
-    print(f" 💧 Νερό (τελ.{COOLDOWN_MINUTES}m) : {recent_water:.2f} Λίτρα")
-    
-    daytime = is_daytime(sunrise_str, sunset_str)
-    print(f" ☀️ Φάση Ημέρας    : {'ΜΕΡΑ (Κίνδυνος Εξάτμισης)' if daytime else 'ΝΥΧΤΑ (Ιδανικό)'}\n")
-    
+    if moisture >= MOISTURE_THRESHOLD:
+        return 0, 2, "RULE 2 - MOISTURE SUFFICIENT", SLEEP_NORMAL_SECONDS
+
+    if weather is None:
+        return (
+            0,
+            0,
+            "WEATHER DATA UNAVAILABLE - IRRIGATION DEFERRED",
+            SLEEP_DRY_SECONDS,
+        )
+
     if recent_water > 0.1:
-        print(" 🛑 [STATUS: RULE 1 - COOLDOWN ACTIVE]")
-        print("    ΕΝΕΡΓΕΙΑ: Ακύρωση. Προστασία από υπερχείλιση.")
-        return 0, 1, "RULE 1 - COOLDOWN ACTIVE"
-        
-    elif temp >= HEATWAVE_THRESHOLD:
-        print(" 🔥 [STATUS: RULE 5 - HEATWAVE PROTECTION]")
-        print("    ΕΝΕΡΓΕΙΑ: Ακύρωση. Κίνδυνος θερμικού σοκ στα φυτά.")
-        return 0, 5, "RULE 5 - HEATWAVE PROTECTION"
+        return 0, 1, "RULE 1 - COOLDOWN ACTIVE", SLEEP_NORMAL_SECONDS
 
-    elif daytime:
-        print(" ☀️ [STATUS: RULE 6 - DAYTIME EVAPORATION PREVENTION]")
-        print("    ΕΝΕΡΓΕΙΑ: Ακύρωση. Αναμονή για τη νύχτα.")
-        return 0, 6, "RULE 6 - DAYTIME EVAPORATION"
+    if weather["temperature"] >= HEATWAVE_THRESHOLD:
+        return 0, 5, "RULE 5 - HEATWAVE PROTECTION", SLEEP_DRY_SECONDS
 
-    elif actual_rain >= ACTUAL_RAIN_THRESHOLD:
-        print(" ☔ [STATUS: RULE 7 - RECENT RAIN CONFIRMED]")
-        print("    ΕΝΕΡΓΕΙΑ: Ακύρωση. Το νερό είναι ήδη στο έδαφος.")
-        return 0, 7, "RULE 7 - RECENT RAIN CONFIRMED"
+    if is_daytime(weather["sunrise"], weather["sunset"]):
+        return 0, 6, "RULE 6 - DAYTIME EVAPORATION PREVENTION", SLEEP_NORMAL_SECONDS
 
-    elif moisture >= CRITICAL_MOISTURE:
-        print(" ✅ [STATUS: RULE 2 - MOISTURE SUFFICIENT]")
-        print("    ΕΝΕΡΓΕΙΑ: Καμία δράση. Το σύστημα παραμένει σε αναμονή.")
-        return 0, 2, "RULE 2 - MOISTURE SUFFICIENT"
+    if weather["actual_rain"] >= ACTUAL_RAIN_THRESHOLD:
+        return 0, 7, "RULE 7 - RECENT RAIN CONFIRMED", SLEEP_RAIN_DELAY_SECONDS
 
-    elif rain_vol >= RAIN_VOLUME_THRESHOLD:
-        print(" ⛈️ [STATUS: RULE 4 - STORM INCOMING]")
-        print("    ΕΝΕΡΓΕΙΑ: Αναβολή ποτίσματος.")
-        return 0, 4, "RULE 4 - STORM INCOMING"
+    if weather["rain_volume"] >= RAIN_VOLUME_THRESHOLD:
+        return 0, 4, "RULE 4 - STORM INCOMING", SLEEP_RAIN_DELAY_SECONDS
 
-    elif rain_prob >= RAIN_PROBABILITY_THRESHOLD:
-        print(" ⏳ [STATUS: RULE 3 - RAIN DELAY POLICY]")
-        print("    ΕΝΕΡΓΕΙΑ: Αναβολή ποτίσματος. Αφήνουμε τη φύση να δουλέψει.")
-        return 0, 3, "RULE 3 - RAIN DELAY POLICY"
+    if weather["rain_probability"] >= RAIN_PROBABILITY_THRESHOLD:
+        return 0, 3, "RULE 3 - RAIN DELAY POLICY", SLEEP_RAIN_DELAY_SECONDS
 
+    return 1, 0, "CONDITIONS PERFECT - IRRIGATION REQUIRED", SLEEP_DRY_SECONDS
+
+
+def publish_sleep_command(client, sleep_seconds: int):
+    command = {
+        "command": "SET_SLEEP",
+        "value": sleep_seconds,
+    }
+
+    result = client.publish(COMMAND_TOPIC, json.dumps(command), qos=1)
+
+    if result.rc == mqtt.MQTT_ERR_SUCCESS:
+        print(f"[MQTT] QoS 1 command published: {command}")
     else:
-        print(" 🚨 [STATUS: CONDITIONS PERFECT - ACTION REQUIRED]")
-        print("    ΕΝΕΡΓΕΙΑ: ΞΕΚΙΝΗΣΤΕ ΤΟ ΠΟΤΙΣΜΑ ΑΜΕΣΑ!")
-        return 1, 0, "CONDITIONS PERFECT - ACTION REQUIRED"
+        print(f"[MQTT] Command publish failed with code {result.rc}")
 
+
+def parse_ngsi_ld_telemetry(payload: bytes) -> tuple[float, float]:
+    entity = json.loads(payload.decode("utf-8"))
+
+    if entity.get("type") != "AgriSoil":
+        raise ValueError("Unexpected NGSI-LD entity type.")
+
+    moisture = float(entity["moisture_percent"]["value"])
+    water_liters = float(entity["water_liters"]["value"])
+
+    return moisture, water_liters
+
+
+def process_telemetry(client, payload: bytes):
+    """Event-driven processing for one incoming edge telemetry message."""
+    moisture, water_liters = parse_ngsi_ld_telemetry(payload)
+
+    # Step A: immediately persist telemetry for Grafana.
+    write_telemetry(moisture, water_liters)
+
+    # Step B: query weather only if soil moisture is below 25%.
+    weather = get_weather() if moisture < MOISTURE_THRESHOLD else None
+    recent_water = get_recent_water_liters(COOLDOWN_MINUTES)
+
+    # Steps C and D: make and persist the decision.
+    action, rule_id, status, sleep_seconds = evaluate_rules(
+        moisture=moisture,
+        weather=weather,
+        recent_water=recent_water,
+    )
+    write_decision(action, rule_id, status)
+
+    # Step E: dynamically update the Pi duty cycle.
+    publish_sleep_command(client, sleep_seconds)
+
+    print(
+        f"[DECISION] moisture={moisture:.1f}% | action={action} | "
+        f"rule={rule_id} | sleep={sleep_seconds}s | {status}"
+    )
+
+
+def on_connect(client, _userdata, _flags, reason_code, _properties=None):
+    if reason_code == 0:
+        print("[MQTT] Logic Hub connected.")
+        client.subscribe(TELEMETRY_TOPIC, qos=1)
+        print(f"[MQTT] Subscribed to {TELEMETRY_TOPIC} with QoS 1.")
+    else:
+        print(f"[MQTT] Connection failed: {reason_code}")
+
+
+def on_message(client, _userdata, message):
+    print(
+        f"[MQTT] RAW message received | "
+        f"topic={message.topic} | payload={message.payload!r}"
+    )
+
+    if message.topic != TELEMETRY_TOPIC:
+        return
+
+    try:
+        process_telemetry(client, message.payload)
+    except (
+        json.JSONDecodeError,
+        KeyError,
+        TypeError,
+        ValueError,
+        requests.RequestException,
+    ) as exc:
+        print(f"[ERROR] Failed to process telemetry event: {exc}")
+
+def on_subscribe(_client, _userdata, mid, granted_qos, _properties=None):
+    print(
+        f"[MQTT] Subscription acknowledged. "
+        f"Message id: {mid}, granted QoS: {granted_qos}"
+    )
+
+
+def on_disconnect(
+        _client,
+        _userdata,
+        _disconnect_flags,
+        reason_code,
+        _properties,
+    ):
+        print(f"[MQTT] Disconnected from broker. Reason: {reason_code}")
 
 def main():
-    print("🤖 Ο 7-Core Έξυπνος Εγκέφαλος ξεκίνησε τη λειτουργία του...")
-    print("Κάνει έλεγχο και γράφει στο Grafana κάθε 5 δευτερόλεπτα...\n")
-    
-    while True:
-        latest_moisture = get_latest_value("telemetry", "moisture_percent")
-        recent_water = check_recent_watering(COOLDOWN_MINUTES)
-        
-        latest_temp = get_latest_value("weather_forecast", "temperature")
-        latest_rain_prob = get_latest_value("weather_forecast", "rain_prob_12h")
-        latest_rain_vol = get_latest_value("weather_forecast", "rain_12h")
-        actual_rain = get_latest_value("weather_forecast", "actual_rain_6h")
-        sunrise = get_latest_value("weather_forecast", "sunrise", as_string=True)
-        sunset = get_latest_value("weather_forecast", "sunset", as_string=True)
-        
-        if None not in (latest_moisture, latest_temp, latest_rain_prob, latest_rain_vol, actual_rain, sunrise, sunset):
-            # Παίρνουμε την απόφαση και τα status...
-            action, rule_id, status_msg = make_decision(
-                latest_moisture, latest_rain_prob, latest_rain_vol, actual_rain, latest_temp, recent_water, sunrise, sunset
-            )
-            # ...και τα στέλνουμε στη βάση!
-            send_decision_to_influxdb(action, rule_id, status_msg)
-            print("💾 Τα δεδομένα Απόφασης/Status στάλθηκαν επιτυχώς στην InfluxDB.")
-            print("="*55 + "\n")
-        else:
-            print("⏳ Αναμονή... Λείπουν δεδομένα από τη βάση.")
-            
-        time.sleep(5) 
+    print("[SYSTEM] Starting event-driven Smart Agriculture Logic Hub...")
+
+    client = mqtt.Client(
+        mqtt.CallbackAPIVersion.VERSION2,
+        client_id=f"{MQTT_TEAM}-brain",
+    )
+    client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
+    client.on_connect = on_connect
+    client.on_message = on_message
+    client.on_subscribe = on_subscribe
+    client.on_disconnect = on_disconnect
+    client.on_log = on_log
+    client.reconnect_delay_set(min_delay=1, max_delay=30)
+
+    client.connect(BROKER, PORT, keepalive=60)
+
+    try:
+        client.loop_forever()
+    except KeyboardInterrupt:
+        print("\n[SYSTEM] Logic Hub stopped.")
+    finally:
+        client.disconnect()
+
 
 if __name__ == "__main__":
     main()
