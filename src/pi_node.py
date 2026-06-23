@@ -27,8 +27,11 @@ PULSES_PER_LITER = 1621.3
 FLOW_SENSOR_PIN = 17
 
 # Soil moisture calibration
-DRY_VALUE = 26300.0
-WET_VALUE = 7000.0
+DRY_RAW = 21800.0
+WATERED_RAW = 6208.0
+
+DRY_TARGET_PERCENT = 25.0
+WATERED_TARGET_PERCENT = 65.0
 
 pulse_count = 0
 
@@ -146,12 +149,17 @@ def publish_data(client, moisture_percent: float, water_liters: float):
 
 
 def calculate_moisture_percent(raw_value: float) -> float:
-    if DRY_VALUE == WET_VALUE:
+    if DRY_RAW == WATERED_RAW:
         return 0.0
 
-    moisture = 100.0 * (DRY_VALUE - raw_value) / (DRY_VALUE - WET_VALUE)
-    return max(0.0, min(100.0, moisture))
+    moisture = (
+        DRY_TARGET_PERCENT
+        + (WATERED_TARGET_PERCENT - DRY_TARGET_PERCENT)
+        * (DRY_RAW - raw_value)
+        / (DRY_RAW - WATERED_RAW)
+    )
 
+    return max(0.0, min(100.0, moisture))
 
 def main():
     global pulse_count
