@@ -1,0 +1,27 @@
+# System Architecture
+
+## Overview
+Describe the project at a high level.
+
+## Components
+- sensors / input devices:
+Humidity Sensor, Flow sensor
+- processing node:
+Ubuntu server probably using a vps
+- communication
+MQTT, Twingate for pi access
+- storage
+IfluxDB
+- dashboard / app
+Grafana
+- actuators / notifications
+Using Grafana contact point we can send an email notification to multiple users.
+
+## Data Flow
+Taking raw data from the sensors we are calculating percentage and liters of the sensors and we send a json file to 
+
+## Decisions and Tradeoffs
+Explain key design choices.
+
+## Validation Plan
+Describe how you will test the system.
