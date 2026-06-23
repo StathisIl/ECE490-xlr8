@@ -48,4 +48,4 @@ The system also features a bidirectional communication loop for dynamic duty cyc
 - demo evidence in `demo-evidence/`
 
 ## Current Status
-Update this section with a one-paragraph summary each week.
+Pi code is in feature/pi-node/src
